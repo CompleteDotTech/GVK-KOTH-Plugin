@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text;
+using GVK.Koth.Core;
 using GVK.Koth.Core.Config;
 using GVK.Koth.Zones;
 using Sandbox.ModAPI;
@@ -45,11 +46,10 @@ namespace GVK.Koth.Services
             var sb = new StringBuilder("GVKKOTH|1\n");
             foreach (var zone in open)
             {
-                sb.Append("O|").Append(Clean(zone.Name)).Append('|').Append(Position(zone.Center)).Append('|')
-                  .Append(zone.Profile.Radius.ToString("0", c)).Append('|')
-                  .Append(zone.Capture.Fraction.ToString("0.000", c)).Append('|')
-                  .Append(zone.LastParticipantCount.ToString(c)).Append('|')
-                  .Append((zone.Grid?.EntityId ?? 0L).ToString(c)).Append('\n');
+                sb.Append(ClientStateProtocol.BuildOpenZoneRecord(
+                    zone.Name, zone.Center.X, zone.Center.Y, zone.Center.Z, zone.Profile.Radius,
+                    zone.Capture.Fraction, zone.LastParticipantCount, zone.Grid?.EntityId ?? 0L,
+                    zone.LastFactionTags)).Append('\n');
             }
 
             var next = zones.NextSlotZone(now);

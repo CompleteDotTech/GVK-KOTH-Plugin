@@ -58,6 +58,29 @@ namespace GVK.Koth.Core
         /// <summary>Zone points earned toward the next loot drop.</summary>
         public int LootCounter { get; set; }
 
+        /// <summary>Returns a detached copy of faction contributions to the current bar.</summary>
+        public Dictionary<long, double> SnapshotFactionProgress()
+        {
+            return new Dictionary<long, double>(_factionProgress);
+        }
+
+        /// <summary>Restores valid faction contributions for the already restored bar.</summary>
+        public void RestoreFactionProgress(IEnumerable<KeyValuePair<long, double>> restored)
+        {
+            _factionProgress.Clear();
+            if (restored == null || double.IsNaN(Progress) || double.IsInfinity(Progress) || Progress < 0)
+                return;
+
+            foreach (var entry in restored)
+            {
+                double contribution = entry.Value;
+                if (double.IsNaN(contribution) || double.IsInfinity(contribution) || contribution < 0)
+                    continue;
+
+                _factionProgress[entry.Key] = Math.Min(contribution, Progress);
+            }
+        }
+
         /// <summary>
         /// Advances the bar by dtSeconds.
         /// </summary>

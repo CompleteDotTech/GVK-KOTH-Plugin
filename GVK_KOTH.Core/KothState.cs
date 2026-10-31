@@ -37,8 +37,25 @@ namespace GVK.Koth.Core
         public double Progress { get; set; }
         public int LootCounter { get; set; }
 
+        /// <summary>
+        /// Per-faction contribution to the current capture bar. A specified, non-null list
+        /// is a known snapshot, including when empty; an absent element or null list is unknown.
+        /// </summary>
+        public List<FactionProgressSave> FactionProgress { get; set; }
+
+        /// <summary>Whether the faction progress XML element was present or should be written.</summary>
+        [System.Xml.Serialization.XmlIgnore]
+        public bool FactionProgressSpecified { get; set; }
+
         /// <summary>Loot drops earned but not yet delivered (container missing, concealed or full).</summary>
         public int PendingLootDrops { get; set; }
+    }
+
+    /// <summary>One faction's contribution to the saved capture bar.</summary>
+    public sealed class FactionProgressSave
+    {
+        public long FactionId { get; set; }
+        public double Progress { get; set; }
     }
 
     /// <summary>

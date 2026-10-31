@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using GVK.Koth.Core;
 using GVK.Koth.Core.Config;
 using Sandbox.Game.Entities;
@@ -30,6 +31,22 @@ namespace GVK.Koth.Zones
                 Progress = save.Progress,
                 LootCounter = save.LootCounter
             };
+
+            bool knownFactionProgress = save.FactionProgressSpecified && save.FactionProgress != null;
+            if (!knownFactionProgress && save.Progress > 0 && profile.MinPresenceShare > 0)
+            {
+                // One-time migration: legacy saves have no historical faction credit for this bar.
+                Capture.Progress = 0;
+                Plugin.Log.Warn($"GVK KOTH: reset the incomplete capture bar for zone '{profile.Name}' because its legacy save has no faction presence data. Loot progress and pending loot are preserved.");
+            }
+            else if (knownFactionProgress)
+            {
+                var restored = new List<KeyValuePair<long, double>>();
+                foreach (var entry in save.FactionProgress)
+                    if (entry != null)
+                        restored.Add(new KeyValuePair<long, double>(entry.FactionId, entry.Progress));
+                Capture.RestoreFactionProgress(restored);
+            }
         }
 
         /// <summary>An NPC zone on a tagged grid.</summary>
@@ -68,14 +85,22 @@ namespace GVK.Koth.Zones
         /// <summary>Participants counted at the last check, for status and the HUD.</summary>
         public int LastParticipantCount { get; set; }
 
+        /// <summary>Faction tags observed at the last check, for the HUD.</summary>
+        public string[] LastFactionTags { get; set; } = new string[0];
+
         public long LootContainerId;
         public double SecondsToNextLootAttempt;
 
-        /// <summary>Copies the bar and loot counter into the saved state.</summary>
+        /// <summary>Copies the bar, faction credit and loot counter into the saved state.</summary>
         public void StoreState()
         {
             Save.Progress = Capture.Progress;
             Save.LootCounter = Capture.LootCounter;
+            var factionProgress = new List<FactionProgressSave>();
+            foreach (var entry in Capture.SnapshotFactionProgress())
+                factionProgress.Add(new FactionProgressSave { FactionId = entry.Key, Progress = entry.Value });
+            Save.FactionProgress = factionProgress;
+            Save.FactionProgressSpecified = true;
         }
     }
 }

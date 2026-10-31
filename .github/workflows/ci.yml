@@ -1,0 +1,51 @@
+name: Core tests
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  core-net48:
+    name: Core net48 tests
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        with:
+          dotnet-version: 10.0.403
+      - name: Restore and test Core net48
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $project = Join-Path $env:GITHUB_WORKSPACE 'GVK_KOTH.Tests/GVK_KOTH.Tests.csproj'
+          $runDir = Join-Path $env:RUNNER_TEMP 'core-net48'
+          New-Item -ItemType Directory -Path $runDir -ErrorAction Stop | Out-Null
+          # Select the exact SDK from a runner-only working directory.
+          '{"sdk":{"version":"10.0.403","rollForward":"disable"}}' | Set-Content -Path (Join-Path $runDir 'global.json') -Encoding utf8
+          Set-Location $runDir
+          dotnet --info
+          if ($LASTEXITCODE -ne 0) { throw 'dotnet --info failed' }
+          $version = dotnet --version
+          if ($LASTEXITCODE -ne 0 -or $version -ne '10.0.403') { throw "Unexpected SDK version: $version" }
+          dotnet restore $project
+          if ($LASTEXITCODE -ne 0) { throw 'Core net48 restore failed' }
+          dotnet test $project --configuration Release --no-restore --framework net48 --logger 'trx;LogFileName=core-net48.trx' --results-directory $runDir
+          if ($LASTEXITCODE -ne 0) { throw 'Core net48 tests failed' }
+          [xml]$trx = Get-Content -Raw (Join-Path $runDir 'core-net48.trx')
+          $summary = $trx.TestRun.ResultSummary
+          if ($summary.outcome -ne 'Completed' -or $null -eq $summary.Counters) { throw 'Missing or incomplete test results' }
+          $counters = $summary.Counters
+          foreach ($name in @('total', 'executed', 'passed', 'failed', 'error', 'aborted', 'inconclusive', 'notExecuted')) {
+            $value = 0
+            if (-not [int]::TryParse($counters.GetAttribute($name), [ref]$value) -or $value -lt 0) { throw "Invalid test counter: $name" }
+          }
+          if ([int]$counters.total -le 0 -or [int]$counters.executed -ne [int]$counters.total -or [int]$counters.passed -ne [int]$counters.total) { throw 'Not all Core net48 tests passed and executed' }
+          foreach ($name in @('failed', 'error', 'aborted', 'inconclusive', 'notExecuted')) {
+            if ([int]$counters.GetAttribute($name) -ne 0) { throw "Nonzero test counter: $name" }
+          }

@@ -119,6 +119,8 @@ namespace GVK.Koth.Zones
 
                 if (zone.Active && profile.Mode != ZoneMode.RulesOnly)
                     RunCapture(zone, dt);
+                else
+                    zone.LastFactionTags = new string[0];
 
                 DeliverQueuedLoot(zone, dt);
             }
@@ -217,7 +219,7 @@ namespace GVK.Koth.Zones
         public void SaveState()
         {
             _secondsSinceSave = 0;
-            foreach (var zone in _zones.Values)
+            foreach (var zone in Zones.ToList())
                 zone.StoreState();
             _data.SaveState();
         }
@@ -231,6 +233,18 @@ namespace GVK.Koth.Zones
                 : ParticipantScanner.Capture(zone.Profile, zone.Center);
 
             zone.LastParticipantCount = participants.Count;
+            var tags = new List<string>();
+            var factionIds = new HashSet<long>();
+            foreach (long factionId in participants)
+            {
+                if (!factionIds.Add(factionId))
+                    continue;
+
+                var faction = MyAPIGateway.Session.Factions.TryGetFactionById(factionId);
+                if (faction != null)
+                    tags.Add(faction.Tag);
+            }
+            zone.LastFactionTags = tags.ToArray();
             var result = zone.Capture.Tick(dt, participants);
             if (result.Completed)
                 Reward(zone, result);
@@ -397,7 +411,11 @@ namespace GVK.Koth.Zones
             if (pick != null)
                 return pick.Zone;
 
-            var pool = slot.Pool.Where(name => Find(name)?.Profile.Enabled == true).ToList();
+            var pool = slot.Pool.Where(name =>
+            {
+                var profile = Profile(name);
+                return profile != null && profile.Enabled && profile.Activation == ZoneActivation.Slot;
+            }).ToList();
             if (pool.Count == 0)
             {
                 _plugin.Alerts.Send($"Slot '{slot.Name}' has no enabled zones to pick from.");
