@@ -118,11 +118,24 @@ namespace GVK.Koth.Zones
                 }
             }
 
-            foreach (var old in _data.State.NpcZones.Where(n => !_zones.ContainsKey(n.GridId) && now - n.LastSeenUtc > ForgetAfter).ToList())
+            foreach (var old in _data.State.NpcZones.ToList())
             {
+                var associatedZoneSave = _data.State.Zones
+                    .Where(z => string.Equals(z.Name, old.SaveKey, StringComparison.OrdinalIgnoreCase))
+                    .OrderByDescending(z => z.LootReconciliation != null || z.PendingLootDrops != 0)
+                    .FirstOrDefault();
+                if (!CanForgetSavedZone(old, associatedZoneSave, now, _zones.ContainsKey(old.GridId)))
+                    continue;
+
                 _data.State.NpcZones.Remove(old);
                 _data.State.Zones.RemoveAll(z => z.Name == old.SaveKey);
             }
+        }
+
+        internal static bool CanForgetSavedZone(NpcZoneSave npc, ZoneSave save, DateTime now, bool active)
+        {
+            return !active && now - npc.LastSeenUtc > ForgetAfter
+                && (save == null || (save.LootReconciliation == null && save.PendingLootDrops == 0));
         }
 
         private void Check(long gridId, DateTime now)

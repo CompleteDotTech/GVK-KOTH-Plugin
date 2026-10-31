@@ -48,7 +48,13 @@ namespace GVK.Koth.Core
         public bool FactionProgressSpecified { get; set; }
 
         /// <summary>Loot drops earned but not yet delivered (container missing, concealed or full).</summary>
-        public int PendingLootDrops { get; set; }
+        public long PendingLootDrops { get; set; }
+
+        /// <summary>Last known loot delivery position; null means the location is unknown.</summary>
+        public LootPositionSave LootPosition { get; set; }
+
+        /// <summary>Unresolved delivery attempt requiring operator reconciliation; null for legacy saves.</summary>
+        public LootReconciliationSave LootReconciliation { get; set; }
     }
 
     /// <summary>One faction's contribution to the saved capture bar.</summary>
@@ -56,6 +62,35 @@ namespace GVK.Koth.Core
     {
         public long FactionId { get; set; }
         public double Progress { get; set; }
+    }
+
+    /// <summary>Saved world position for recovering an owed loot delivery.</summary>
+    public sealed class LootPositionSave
+    {
+        public double X { get; set; }
+        public double Y { get; set; }
+        public double Z { get; set; }
+    }
+
+    /// <summary>Details of a loot delivery whose residual could not be verified.</summary>
+    public sealed class LootReconciliationSave
+    {
+        public string AttemptId { get; set; } = "";
+        public long ContainerId { get; set; }
+        public DateTime CreatedUtc { get; set; }
+        public string Reason { get; set; } = "";
+        public List<LootReconciliationItemSave> Items { get; set; } = new List<LootReconciliationItemSave>();
+    }
+
+    /// <summary>Item quantities in raw fixed-point units (one million units per item).</summary>
+    public sealed class LootReconciliationItemSave
+    {
+        public string TypeId { get; set; } = "";
+        public string SubtypeId { get; set; } = "";
+        public long RequestedRaw { get; set; }
+        public long BeforeRaw { get; set; }
+        public long ObservedRaw { get; set; }
+        public bool ObservedKnown { get; set; }
     }
 
     /// <summary>

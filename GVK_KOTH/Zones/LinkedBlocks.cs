@@ -28,7 +28,7 @@ namespace GVK.Koth.Zones
         /// <summary>Records a grid's tagged NPC blocks. Called once when the grid is scanned.</summary>
         public void Scan(MyCubeGrid grid)
         {
-            if (_byGrid.ContainsKey(grid.EntityId))
+            if (grid == null || grid.Closed || !IsNpcGrid(grid) || _byGrid.ContainsKey(grid.EntityId))
                 return;
 
             List<Link> links = null;
@@ -39,7 +39,9 @@ namespace GVK.Koth.Zones
                 if (!NpcTag.ReadLink(functional.CustomData, out string zone))
                     continue;
 
-                (links ??= new List<Link>()).Add(new Link { Block = functional, Zone = zone });
+                var link = new Link { Block = functional, Zone = zone };
+                if (IsEligible(link, grid))
+                    (links ??= new List<Link>()).Add(link);
             }
 
             if (links != null)
@@ -55,18 +57,35 @@ namespace GVK.Koth.Zones
             {
                 var links = _byGrid[gridId];
                 links.RemoveAll(l => l.Block == null || l.Block.Closed);
-                if (links.Count == 0 || !MyEntities.TryGetEntityById(gridId, out var entity) || entity.Closed)
+                if (links.Count == 0 || !MyEntities.TryGetEntityById(gridId, out var entity)
+                    || entity.Closed || !(entity is MyCubeGrid grid) || !IsNpcGrid(grid))
                 {
                     _byGrid.Remove(gridId);
                     continue;
                 }
 
-                foreach (var link in links)
+                for (int i = links.Count - 1; i >= 0; i--)
                 {
+                    var link = links[i];
+                    if (!IsEligible(link, grid))
+                    {
+                        links.RemoveAt(i);
+                        continue;
+                    }
+
                     bool on = ShouldBeOn(link, openZones);
                     if (link.Block.Enabled != on)
-                        link.Block.Enabled = on;
+                    {
+                        // Ownership can change after the scan or between linked blocks.
+                        if (IsEligible(link, grid))
+                            link.Block.Enabled = on;
+                        else
+                            links.RemoveAt(i);
+                    }
                 }
+
+                if (links.Count == 0)
+                    _byGrid.Remove(gridId);
             }
         }
 
@@ -88,6 +107,17 @@ namespace GVK.Koth.Zones
                 }
             }
             return false;
+        }
+
+        private static bool IsEligible(Link link, MyCubeGrid grid)
+        {
+            return !grid.Closed && IsNpcGrid(grid) && link.Block != null && !link.Block.Closed
+                && link.Block.CubeGrid == grid && IsNpc(link.Block.OwnerId);
+        }
+
+        private static bool IsNpcGrid(MyCubeGrid grid)
+        {
+            return grid.BigOwners.Count > 0 && IsNpc(grid.BigOwners[0]);
         }
 
         private static bool IsNpc(long identityId)

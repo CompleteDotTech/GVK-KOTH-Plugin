@@ -25,14 +25,16 @@ namespace GVK.Koth.Commands
 
             Plugin.LoadConfig();
             var problems = Plugin.ConfigProblems;
-            if (problems.Count == 0)
+            if (Plugin.LastConfigLoadAccepted && problems.Count == 0)
             {
                 Context.Respond($"GVK KOTH config reloaded: {Plugin.Config.Zones.Count} zones, {Plugin.Config.Slots.Count} slots, no problems.");
                 return;
             }
 
             var sb = new StringBuilder();
-            sb.AppendLine($"GVK KOTH config reloaded with {problems.Count} problem(s):");
+            sb.AppendLine(Plugin.LastConfigLoadAccepted
+                ? $"GVK KOTH config reloaded with {problems.Count} problem(s):"
+                : $"GVK KOTH config rejected; previous config retained. {problems.Count} problem(s):");
             foreach (string problem in problems)
                 sb.AppendLine("- " + problem);
             Context.Respond(sb.ToString());
@@ -52,20 +54,86 @@ namespace GVK.Koth.Commands
             var zones = Plugin.Zones;
             var sb = new StringBuilder();
             sb.AppendLine($"GVK KOTH: {(cfg.Enabled ? "enabled" : "DISABLED")}, {(zones != null ? "running" : "session not loaded")}, config problems: {Plugin.ConfigProblems.Count}");
-            if (zones == null)
+            if (zones != null)
             {
-                Context.Respond(sb.ToString());
-                return;
+                foreach (var zone in zones.Zones)
+                {
+                    string force = zones.ForceState(zone.Name);
+                    sb.AppendLine($"- {zone.Name} ({zone.Profile.Mode}, {zone.Profile.Activation}{(zone.Profile.Enabled ? "" : ", disabled")}{(force == "" ? "" : ", " + force)}): "
+                        + $"{(zone.Active ? "OPEN" : "closed")}, counted {zone.LastParticipantCount}, "
+                        + $"bar {zone.Capture.Fraction:P0}, loot counter {zone.Capture.LootCounter}, queued drops {zone.Save.PendingLootDrops}");
+                    if (zone.Save.LootReconciliation != null)
+                        AppendReconciliation(sb, zone.Save.LootReconciliation);
+                }
             }
 
-            foreach (var zone in zones.Zones)
+            var savedZones = Plugin.Data?.State?.Zones;
+            if (savedZones != null)
             {
-                string force = zones.ForceState(zone.Name);
-                sb.AppendLine($"- {zone.Name} ({zone.Profile.Mode}, {zone.Profile.Activation}{(zone.Profile.Enabled ? "" : ", disabled")}{(force == "" ? "" : ", " + force)}): "
-                    + $"{(zone.Active ? "OPEN" : "closed")}, counted {zone.LastParticipantCount}, "
-                    + $"bar {zone.Capture.Fraction:P0}, loot counter {zone.Capture.LootCounter}, queued drops {zone.Save.PendingLootDrops}");
+                var shownSaves = new System.Collections.Generic.List<GVK.Koth.Core.ZoneSave>();
+                foreach (var save in savedZones.OrderByDescending(z => z?.LootReconciliation != null))
+                {
+                    if (save == null || (save.LootReconciliation == null && save.PendingLootDrops <= 0))
+                        continue;
+                    bool shown = (zones != null && zones.Zones.Any(zone =>
+                            (save.LootReconciliation == null || zone.Save.LootReconciliation != null)
+                            && SameSave(zone.Save, save)))
+                        || shownSaves.Any(previous => SameSave(previous, save));
+                    if (shown)
+                        continue;
+                    shownSaves.Add(save);
+                    sb.AppendLine($"- saved zone {save.Name} (SaveKey/name), queued drops {save.PendingLootDrops.ToString(CultureInfo.InvariantCulture)}");
+                    AppendSavedPosition(sb, save.LootPosition);
+                    if (save.LootReconciliation != null)
+                        AppendReconciliation(sb, save.LootReconciliation);
+                    else
+                        sb.AppendLine("  OWED: pending delivery.");
+                }
             }
             Context.Respond(sb.ToString());
+        }
+
+        private static bool SameSave(GVK.Koth.Core.ZoneSave left, GVK.Koth.Core.ZoneSave right)
+        {
+            return object.ReferenceEquals(left, right)
+                || (!string.IsNullOrEmpty(right.Name) && string.Equals(left.Name, right.Name, System.StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static void AppendSavedPosition(StringBuilder sb, GVK.Koth.Core.LootPositionSave position)
+        {
+            if (position == null || double.IsNaN(position.X) || double.IsInfinity(position.X)
+                || double.IsNaN(position.Y) || double.IsInfinity(position.Y)
+                || double.IsNaN(position.Z) || double.IsInfinity(position.Z))
+            {
+                sb.AppendLine("  Saved location unknown; delivery blocked pending operator assessment.");
+                return;
+            }
+            sb.AppendLine($"  Saved location: {position.X.ToString("R", CultureInfo.InvariantCulture)}, {position.Y.ToString("R", CultureInfo.InvariantCulture)}, {position.Z.ToString("R", CultureInfo.InvariantCulture)}");
+        }
+
+        private static void AppendReconciliation(StringBuilder sb, GVK.Koth.Core.LootReconciliationSave reconciliation)
+        {
+            sb.AppendLine($"  SUSPENDED: loot reconciliation required; attempt {reconciliation.AttemptId}, container {reconciliation.ContainerId.ToString(CultureInfo.InvariantCulture)}, reason: {reconciliation.Reason}");
+            if (reconciliation.Items == null || reconciliation.Items.Count == 0)
+                sb.AppendLine("  Reconciliation items unavailable.");
+            else
+            {
+                foreach (var item in reconciliation.Items)
+                {
+                    if (item == null)
+                    {
+                        sb.AppendLine("  Reconciliation item unavailable.");
+                        continue;
+                    }
+                    string observed = item.ObservedKnown ? FormatRaw(item.ObservedRaw) : "unknown";
+                    sb.AppendLine($"  {item.TypeId}/{item.SubtypeId}: requested {FormatRaw(item.RequestedRaw)}, before {FormatRaw(item.BeforeRaw)}, observed {observed}");
+                }
+            }
+        }
+
+        private static string FormatRaw(long raw)
+        {
+            return (raw / 1000000m).ToString("0.######", CultureInfo.InvariantCulture);
         }
 
         [Command("start", "Forces a zone open until !koth auto <zone>. Usage: !koth start <zone>")]

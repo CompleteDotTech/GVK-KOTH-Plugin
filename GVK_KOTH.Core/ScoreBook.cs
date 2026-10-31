@@ -71,7 +71,8 @@ namespace GVK.Koth.Core
         public FactionScore Get(long factionId) => Data.Factions.FirstOrDefault(f => f.FactionId == factionId);
 
         /// <summary>
-        /// Adds (or subtracts) points. The applied change is clamped so the total stays at 0 or more.
+        /// Adds (or subtracts) points, saturating valid totals between 0 and int.MaxValue.
+        /// Rejects a negative stored total; the returned change is the actual total delta.
         /// </summary>
         public ScoreLogEntry Add(long factionId, string tag, string name, int change, string source, string reason, DateTime utcNow)
         {
@@ -82,11 +83,16 @@ namespace GVK.Koth.Core
                 Data.Factions.Add(score);
             }
 
+            if (score.Points < 0)
+                throw new InvalidOperationException("Cannot adjust a negative stored season total.");
+
             if (!string.IsNullOrEmpty(tag)) score.Tag = tag;
             if (!string.IsNullOrEmpty(name)) score.Name = name;
 
-            int applied = Math.Max(change, -score.Points);
-            score.Points += applied;
+            long desired = (long)score.Points + change;
+            int total = (int)Math.Max(0L, Math.Min((long)int.MaxValue, desired));
+            int applied = (int)((long)total - score.Points);
+            score.Points = total;
 
             return new ScoreLogEntry
             {

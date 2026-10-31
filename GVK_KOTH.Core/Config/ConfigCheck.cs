@@ -34,6 +34,25 @@ namespace GVK.Koth.Core.Config
                 else if (!names.Add(zone.Name))
                     problems.Add($"{label}: the name is used by more than one zone.");
 
+                CheckFinite(problems, label, nameof(zone.X), zone.X);
+                CheckFinite(problems, label, nameof(zone.Y), zone.Y);
+                CheckFinite(problems, label, nameof(zone.Z), zone.Z);
+                CheckFinite(problems, label, nameof(zone.Radius), zone.Radius);
+                CheckFinite(problems, label, nameof(zone.CaptureSeconds), zone.CaptureSeconds);
+                CheckFinite(problems, label, nameof(zone.MinPresenceShare), zone.MinPresenceShare);
+                CheckFinite(problems, label, nameof(zone.NoThrusterRange), zone.NoThrusterRange);
+                CheckFinite(problems, label, nameof(zone.NoLargeGridPowerRange), zone.NoLargeGridPowerRange);
+                CheckFinite(problems, label, nameof(zone.NoSafeZoneRange), zone.NoSafeZoneRange);
+                CheckFinite(problems, label, nameof(zone.NoProjectorRange), zone.NoProjectorRange);
+                CheckFinite(problems, label, nameof(zone.LinkRange), zone.LinkRange);
+
+                if (zone.PointsPerCompletion > 0 && zone.CreditsPerPoint >= 0 &&
+                    zone.CreditsPerPoint > long.MaxValue / zone.PointsPerCompletion)
+                    problems.Add($"{label}: PointsPerCompletion multiplied by CreditsPerPoint exceeds the supported credits range.");
+
+                if (zone.IdleDrainPlayers < 0)
+                    problems.Add($"{label}: IdleDrainPlayers can't be negative.");
+
                 if (zone.Mode != ZoneMode.RulesOnly && zone.Radius <= 0)
                     problems.Add($"{label}: Radius must be above 0.");
 
@@ -126,6 +145,12 @@ namespace GVK.Koth.Core.Config
             }
 
             return problems;
+        }
+
+        private static void CheckFinite(List<string> problems, string label, string name, double value)
+        {
+            if (double.IsNaN(value) || double.IsInfinity(value))
+                problems.Add($"{label}: {name} must be finite.");
         }
     }
 }

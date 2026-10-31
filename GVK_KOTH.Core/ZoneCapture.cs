@@ -31,7 +31,7 @@ namespace GVK.Koth.Core
         public int PointsEach;
 
         /// <summary>Loot drops earned this completion.</summary>
-        public int LootDrops;
+        public long LootDrops;
     }
 
     /// <summary>
@@ -85,33 +85,46 @@ namespace GVK.Koth.Core
         /// Advances the bar by dtSeconds.
         /// </summary>
         /// <param name="participants">The faction of each eligible participant (a player, or a station in Encampment mode).</param>
-        public CaptureResult Tick(double dtSeconds, IReadOnlyCollection<long> participants)
+        public CaptureResult Tick(double dtSeconds, IReadOnlyCollection<long> participants, long maxNewLootDrops = long.MaxValue)
         {
-            if (dtSeconds <= 0 || _rules.CaptureSeconds <= 0)
+            if (!Finite(dtSeconds) || dtSeconds <= 0 ||
+                !Finite(_rules.CaptureSeconds) || _rules.CaptureSeconds <= 0 ||
+                !Finite(Progress) || Progress < 0 || Progress > _rules.CaptureSeconds ||
+                !Finite(_rules.MinPresenceShare) || _rules.MinPresenceShare < 0 || _rules.MinPresenceShare > 1 ||
+                _rules.MinPlayers < 1 || _rules.IdleDrainPlayers < 0 ||
+                _rules.PointsPerCompletion < 0 || _rules.PointsPerLoot < 0 ||
+                LootCounter < 0 || maxNewLootDrops < 0 ||
+                _factionProgress.Values.Any(p => !Finite(p) || p < 0 || p > Progress))
                 return CaptureResult.None;
 
             int count = participants?.Count ?? 0;
             if (count == 0 || count < _rules.MinPlayers)
             {
-                Drain(dtSeconds);
+                // A full bar may be waiting for queue capacity; do not discard it while held.
+                if (Progress < _rules.CaptureSeconds)
+                    Drain(dtSeconds);
                 return CaptureResult.None;
             }
 
-            double gain = dtSeconds * (_rules.FlatSpeed ? 1.0 : CaptureCurve.Speed(count));
-            Progress += gain;
+            double speed = _rules.FlatSpeed ? 1.0 : CaptureCurve.Speed(count);
+            double remaining = _rules.CaptureSeconds - Progress;
+            double gain = dtSeconds >= remaining / speed ? remaining : dtSeconds * speed;
+            Progress = gain >= remaining ? _rules.CaptureSeconds : Progress + gain;
 
             var present = participants.Distinct().ToList();
             foreach (long faction in present)
             {
                 _factionProgress.TryGetValue(faction, out double had);
-                _factionProgress[faction] = had + gain;
+                _factionProgress[faction] = gain >= Progress - had ? Progress : had + gain;
             }
 
             if (Progress < _rules.CaptureSeconds)
                 return CaptureResult.None;
 
-            return Complete(present);
+            return Complete(present, maxNewLootDrops);
         }
+
+        private static bool Finite(double value) => !double.IsNaN(value) && !double.IsInfinity(value);
 
         public void Reset()
         {
@@ -136,7 +149,7 @@ namespace GVK.Koth.Core
                 _factionProgress[faction] = Math.Min(_factionProgress[faction], Progress);
         }
 
-        private CaptureResult Complete(List<long> present)
+        private CaptureResult Complete(List<long> present, long maxNewLootDrops)
         {
             double needed = _rules.MinPresenceShare * _rules.CaptureSeconds;
             var result = new CaptureResult
@@ -150,9 +163,13 @@ namespace GVK.Koth.Core
 
             if (_rules.PointsPerLoot > 0)
             {
-                LootCounter += result.PointsEach * result.ScoringFactions.Count;
-                result.LootDrops = LootCounter / _rules.PointsPerLoot;
-                LootCounter %= _rules.PointsPerLoot;
+                long points = checked((long)result.PointsEach * result.ScoringFactions.Count + LootCounter);
+                long drops = points / _rules.PointsPerLoot;
+                if (drops > maxNewLootDrops)
+                    return CaptureResult.None;
+
+                result.LootDrops = drops;
+                LootCounter = (int)(points % _rules.PointsPerLoot);
             }
 
             Reset();

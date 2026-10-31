@@ -41,6 +41,8 @@ namespace GVK.Koth
         /// <summary>Problems found the last time the config was loaded.</summary>
         public IReadOnlyList<string> ConfigProblems { get; private set; } = Array.Empty<string>();
 
+        public bool LastConfigLoadAccepted { get; private set; }
+
         /// <summary>Folder for scores, the score log and saved state. Delete it (server stopped) for a new season.</summary>
         public string DataPath => Path.Combine(StoragePath, "GVK_KOTH");
 
@@ -88,6 +90,7 @@ namespace GVK.Koth
                 zones.Rebuild();
                 zones.Start();
                 Zones = zones;
+                ReportRuntimeConfigProblems(zones.CheckLootContainers());
                 Api = new ModApi(this);
                 Api.Register();
                 _clock.Restart();
@@ -104,7 +107,6 @@ namespace GVK.Koth
         {
             try
             {
-                Api?.Unregister();
                 Zones?.Stop();
             }
             catch (Exception ex)
@@ -112,12 +114,30 @@ namespace GVK.Koth
                 Log.Error(ex, "GVK KOTH: failed to save state on unload.");
             }
 
-            Api = null;
-            Zones = null;
-            Sync = null;
-            Mes = null;
-            Data?.Dispose();
-            Data = null;
+            finally
+            {
+                try
+                {
+                    Api?.Unregister();
+                }
+                catch (Exception ex)
+                {
+                    Log.Error(ex, "GVK KOTH: failed to unregister the API on unload.");
+                }
+
+                Api = null;
+                Zones = null;
+                Sync = null;
+                Mes = null;
+                try
+                {
+                    Data?.Dispose();
+                }
+                finally
+                {
+                    Data = null;
+                }
+            }
         }
 
         public override void Update()
@@ -145,7 +165,7 @@ namespace GVK.Koth
         }
 
         /// <summary>
-        /// Reads GVK_KOTH.cfg (writing the commented sample there first if it's missing), checks it and reports
+        /// Reads GVK_KOTH.cfg (creating the embedded sample if it is missing), checks it and reports
         /// every problem. The plugin only reads the file; it never saves over your edits. If the file can't be read,
         /// the previous config stays in use.
         /// </summary>
@@ -155,46 +175,88 @@ namespace GVK.Koth
             if (!File.Exists(path))
                 WriteDefaultConfig(path);
 
+            bool hadPreviousConfig = _config != null;
             KothConfig loaded = null;
+            var problems = new List<string>();
+            LastConfigLoadAccepted = false;
             try
             {
                 using (var reader = File.OpenRead(path))
                     loaded = (KothConfig)new XmlSerializer(typeof(KothConfig)).Deserialize(reader);
+                if (loaded == null)
+                    problems.Add("Config is missing.");
+                else
+                {
+                    KothConfig.ApplyDefaults(loaded);
+                    problems.AddRange(ConfigCheck.Run(loaded));
+                }
             }
             catch (Exception ex)
             {
                 Log.Error(ex, $"GVK KOTH: couldn't read {path}.");
-                Alerts.Send($"couldn't read {ConfigFileName} ({ex.GetBaseException().Message}); {(_config == null ? "running with no zones" : "keeping the previous config")}.");
+                problems.Add($"Couldn't load {ConfigFileName}: {ex.GetBaseException().Message}.");
             }
 
-            if (loaded != null)
+            if (loaded != null && problems.Count == 0)
             {
-                KothConfig.ApplyDefaults(loaded);
                 _config = loaded;
+                LastConfigLoadAccepted = true;
             }
             else if (_config == null)
             {
-                _config = new KothConfig();
+                _config = new KothConfig { Enabled = false };
                 KothConfig.ApplyDefaults(_config);
             }
 
-            ConfigProblems = ConfigCheck.Run(_config);
+            ConfigProblems = problems;
             foreach (string problem in ConfigProblems)
                 Log.Warn("GVK KOTH config: " + problem);
             if (ConfigProblems.Count > 0)
-                Alerts.Send($"config has {ConfigProblems.Count} problem(s):\n- " + string.Join("\n- ", ConfigProblems));
+                Alerts.Send($"config rejected; {(hadPreviousConfig ? "keeping the previous config" : "using disabled startup config")}. {ConfigProblems.Count} problem(s):\n- " + string.Join("\n- ", ConfigProblems));
 
-            Zones?.Rebuild();
+            if (LastConfigLoadAccepted && Zones != null)
+            {
+                Zones.Rebuild();
+                ReportRuntimeConfigProblems(Zones.CheckLootContainers());
+            }
         }
 
-        /// <summary>Writes the commented sample config (embedded from docs/GVK_KOTH.sample.cfg).</summary>
+        /// <summary>Adds world-dependent diagnostics without rejecting the active configuration.</summary>
+        public void ReportRuntimeConfigProblems(IEnumerable<string> problems)
+        {
+            if (problems == null)
+                return;
+
+            var all = new List<string>(ConfigProblems);
+            var seen = new HashSet<string>(all, StringComparer.Ordinal);
+            var added = new List<string>();
+            foreach (string problem in problems)
+            {
+                if (string.IsNullOrWhiteSpace(problem) || !seen.Add(problem))
+                    continue;
+                all.Add(problem);
+                added.Add(problem);
+                Log.Warn("GVK KOTH runtime config: " + problem);
+            }
+
+            if (added.Count == 0)
+                return;
+            ConfigProblems = all;
+            Alerts.Send($"runtime config has {added.Count} problem(s):\n- " + string.Join("\n- ", added));
+        }
+
+        /// <summary>Creates the embedded sample only when no config exists.</summary>
         private static void WriteDefaultConfig(string path)
         {
             try
             {
                 using (var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream("GVK_KOTH.sample.cfg"))
-                using (var file = File.Create(path))
-                    stream?.CopyTo(file);
+                {
+                    if (stream == null)
+                        throw new InvalidOperationException("The embedded sample config is missing.");
+                    using (var file = new FileStream(path, FileMode.CreateNew, FileAccess.Write))
+                        stream.CopyTo(file);
+                }
                 Log.Info($"GVK KOTH: wrote the sample config to {path}.");
             }
             catch (Exception ex)

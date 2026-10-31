@@ -101,6 +101,16 @@ namespace GVK.Koth.Zones
                 factionProgress.Add(new FactionProgressSave { FactionId = entry.Key, Progress = entry.Value });
             Save.FactionProgress = factionProgress;
             Save.FactionProgressSpecified = true;
+
+            // A closed or unavailable NPC grid cannot provide a reliable recovery location.
+            if (Grid == null || (!Grid.Closed && !Grid.MarkedForClose && Grid.PositionComp != null))
+            {
+                Vector3D center = Center;
+                if (!double.IsNaN(center.X) && !double.IsInfinity(center.X) &&
+                    !double.IsNaN(center.Y) && !double.IsInfinity(center.Y) &&
+                    !double.IsNaN(center.Z) && !double.IsInfinity(center.Z))
+                    Save.LootPosition = new LootPositionSave { X = center.X, Y = center.Y, Z = center.Z };
+            }
         }
     }
 }

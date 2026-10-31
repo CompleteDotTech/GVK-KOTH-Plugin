@@ -28,12 +28,21 @@ namespace GVK.Koth.Core.Config
         /// <summary>Weekly Discord roll-up time (UTC).</summary>
         public WeeklyTime WeeklyRollup { get; set; }
 
+        /// <summary>Optional shared settings inherited by zones where the setting was omitted.</summary>
+        public ZoneProfile Defaults { get; set; }
+
         public List<ZoneProfile> Zones { get; set; } = new List<ZoneProfile>();
         public List<SlotConfig> Slots { get; set; } = new List<SlotConfig>();
 
         /// <summary>Fills in anything the file left out.</summary>
         public static void ApplyDefaults(KothConfig config)
         {
+            if (config.Defaults != null && config.Zones != null)
+            {
+                foreach (var zone in config.Zones)
+                    zone.ApplyDefaultsFrom(config.Defaults);
+            }
+
             if (config.SlotWarningMinutes == null || config.SlotWarningMinutes.Count == 0)
                 config.SlotWarningMinutes = new List<int> { 30, 10 };
             if (config.WeeklyRollup == null)

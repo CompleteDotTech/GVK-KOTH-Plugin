@@ -41,6 +41,15 @@ namespace GVK.Koth.Zones
         private readonly HashSet<string> _warningsSent = new HashSet<string>();
         private readonly HashSet<string> _spawnFailuresReported = new HashSet<string>();
 
+        private sealed class LootFailure
+        {
+            public DateTime FirstUtc;
+            public long RetryCount;
+        }
+
+        private readonly Dictionary<string, LootFailure> _lootFailures = new Dictionary<string, LootFailure>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, DateTime> _lootNextAttempt = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+        private readonly HashSet<long> _checkedNpcContainers = new HashSet<long>();
         private double _secondsSinceSave;
 
         // Profiles open at the last check, and profiles whose sandbox boolean has been written at least once.
@@ -77,6 +86,8 @@ namespace GVK.Koth.Zones
         public void Stop()
         {
             SaveState();
+            if (MyAPIGateway.Session != null && MyAPIGateway.Utilities != null)
+                ClosePublishedProfiles();
             _npc.Stop();
         }
 
@@ -95,6 +106,7 @@ namespace GVK.Koth.Zones
             }
 
             _npc.Rebuild();
+            _checkedNpcContainers.Clear();
         }
 
         public void Tick(double dt)
@@ -103,8 +115,15 @@ namespace GVK.Koth.Zones
             var slotZones = UpdateSlots(now);
             _npc.Refresh(now);
 
-            foreach (var zone in Zones.ToList())
+            var liveZones = Zones.ToList();
+            var liveSaves = new HashSet<ZoneSave>();
+            var liveKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var zone in liveZones)
             {
+                liveSaves.Add(zone.Save);
+                liveKeys.Add(zone.Save.Name ?? "");
+                if (zone.IsNpc && _checkedNpcContainers.Add(zone.Npc.GridId))
+                    _plugin.ReportRuntimeConfigProblems(CheckLootContainer(zone));
                 var profile = zone.Profile;
                 bool active = zone.IsNpc ? NpcActive(zone, slotZones, now) : FixedActive(zone, slotZones);
 
@@ -122,7 +141,37 @@ namespace GVK.Koth.Zones
                 else
                     zone.LastFactionTags = new string[0];
 
-                DeliverQueuedLoot(zone, dt);
+                if (!zone.GridGone)
+                    DeliverQueuedLoot(zone.Save, zone.Profile, zone.Center, now);
+            }
+
+            // Recover only the saved grid's own debt; never instantiate a capture runtime.
+            foreach (var npc in _data.State.NpcZones.ToList())
+            {
+                if (npc == null || liveKeys.Contains(npc.SaveKey))
+                    continue;
+                foreach (var save in _data.State.Zones.Where(z => z != null &&
+                    string.Equals(z.Name, npc.SaveKey, StringComparison.OrdinalIgnoreCase)).ToList())
+                {
+                    if (!liveSaves.Add(save))
+                        continue;
+                    var profile = Profile(npc.Profile);
+                    var pos = save.LootPosition;
+                    if (save.LootReconciliation != null || save.PendingLootDrops == 0)
+                        continue;
+                    if (save.PendingLootDrops < 0)
+                    {
+                        ReportLootFailure(save, "Negative saved loot queue; operator correction required.", now);
+                        continue;
+                    }
+                    if (profile == null || profile.Attach != ZoneAttach.NpcTag || pos == null ||
+                        !Finite(pos.X) || !Finite(pos.Y) || !Finite(pos.Z))
+                    {
+                        ReportLootFailure(save, "Saved NPC profile or finite loot position is unavailable; operator action required.", now);
+                        continue;
+                    }
+                    DeliverQueuedLoot(save, profile, new Vector3D(pos.X, pos.Y, pos.Z), now);
+                }
             }
 
             var zones = Zones.ToList();
@@ -151,6 +200,16 @@ namespace GVK.Koth.Zones
                 zones.Where(z => z.Active && z.Profile.Mode != ZoneMode.RulesOnly).Select(z => z.Name),
                 StringComparer.OrdinalIgnoreCase);
 
+            var eligible = new HashSet<string>(Config.Zones.Where(p => p != null && p.Mode != ZoneMode.RulesOnly &&
+                !string.IsNullOrWhiteSpace(p.Name)).Select(p => p.Name), StringComparer.OrdinalIgnoreCase);
+            foreach (var name in _publishedProfiles.Where(name => !eligible.Contains(name)).ToList())
+            {
+                MyAPIGateway.Utilities.SetVariable(SandboxBoolName(name), false);
+                if (_activeProfiles.Remove(name))
+                    _plugin.Api?.ZoneChanged(name, false);
+                _publishedProfiles.Remove(name);
+            }
+
             foreach (var profile in Config.Zones)
             {
                 if (profile.Mode == ZoneMode.RulesOnly || string.IsNullOrWhiteSpace(profile.Name))
@@ -169,6 +228,18 @@ namespace GVK.Koth.Zones
 
             _activeProfiles.Clear();
             _activeProfiles.UnionWith(nowActive);
+        }
+
+        private void ClosePublishedProfiles()
+        {
+            foreach (var name in _publishedProfiles.ToList())
+            {
+                MyAPIGateway.Utilities.SetVariable(SandboxBoolName(name), false);
+                if (_activeProfiles.Contains(name))
+                    _plugin.Api?.ZoneChanged(name, false);
+            }
+            _activeProfiles.Clear();
+            _publishedProfiles.Clear();
         }
 
         public static string SandboxBoolName(string profileName) => $"GVK_KOTH_{profileName}_Active";
@@ -245,13 +316,32 @@ namespace GVK.Koth.Zones
                     tags.Add(faction.Tag);
             }
             zone.LastFactionTags = tags.ToArray();
-            var result = zone.Capture.Tick(dt, participants);
+            if (zone.Save.PendingLootDrops < 0)
+            {
+                ReportLootFailure(zone.Save, "Negative saved loot queue; operator correction required.", DateTime.UtcNow);
+                return;
+            }
+            long credits;
+            try
+            {
+                if (zone.Profile.PointsPerCompletion < 0 || zone.Profile.CreditsPerPoint < 0)
+                    throw new OverflowException();
+                credits = checked((long)zone.Profile.PointsPerCompletion * zone.Profile.CreditsPerPoint);
+            }
+            catch (OverflowException)
+            {
+                ReportLootFailure(zone.Save, "Invalid or overflowing credit reward; operator correction required.", DateTime.UtcNow);
+                return;
+            }
+            var result = zone.Capture.Tick(dt, participants, long.MaxValue - zone.Save.PendingLootDrops);
             if (result.Completed)
-                Reward(zone, result);
+                Reward(zone, result, credits);
         }
 
-        private void Reward(ZoneRuntime zone, CaptureResult result)
+        private void Reward(ZoneRuntime zone, CaptureResult result, long credits)
         {
+            // Verify queue headroom before any payment, scoring, or other completion side effect.
+            long pending = checked(zone.Save.PendingLootDrops + result.LootDrops);
             var profile = zone.Profile;
             var tags = new List<string>();
 
@@ -261,7 +351,6 @@ namespace GVK.Koth.Zones
                 if (faction == null)
                     continue;
 
-                long credits = (long)result.PointsEach * profile.CreditsPerPoint;
                 if (credits > 0)
                     faction.RequestChangeBalance(credits);
 
@@ -274,46 +363,113 @@ namespace GVK.Koth.Zones
 
             if (tags.Count > 0)
             {
-                string credits = profile.CreditsPerPoint > 0
-                    ? $" and {((long)result.PointsEach * profile.CreditsPerPoint).ToString("N0", CultureInfo.InvariantCulture)} SC"
+                string creditText = credits > 0
+                    ? $" and {credits.ToString("N0", CultureInfo.InvariantCulture)} SC"
                     : "";
-                _announce.Both($"{profile.Name}: {string.Join(" ", tags)} scored {result.PointsEach} points{credits} each.");
+                _announce.Both($"{profile.Name}: {string.Join(" ", tags)} scored {result.PointsEach} points{creditText} each.");
                 _plugin.Sync?.Completed(zone, tags);
             }
 
             if (result.LootDrops > 0)
             {
-                zone.Save.PendingLootDrops += result.LootDrops;
-                zone.SecondsToNextLootAttempt = 0;
+                zone.Save.PendingLootDrops = pending;
+                zone.StoreState();
+                _lootNextAttempt.Remove(zone.Save.Name ?? "");
             }
         }
 
-        private void DeliverQueuedLoot(ZoneRuntime zone, double dt)
+        private static bool Finite(double value) => !double.IsNaN(value) && !double.IsInfinity(value);
+
+        public List<string> CheckLootContainers()
         {
-            if (zone.Save.PendingLootDrops <= 0)
-                return;
+            var problems = new List<string>();
+            if (MyAPIGateway.Session == null)
+                return problems;
+            foreach (var zone in Zones.ToList())
+                problems.AddRange(CheckLootContainer(zone));
+            return problems;
+        }
 
-            zone.SecondsToNextLootAttempt -= dt;
-            if (zone.SecondsToNextLootAttempt > 0)
-                return;
-            zone.SecondsToNextLootAttempt = LootRetrySeconds;
+        private IEnumerable<string> CheckLootContainer(ZoneRuntime zone)
+        {
+            if (MyAPIGateway.Session == null || zone.GridGone || zone.Profile.Loot == null ||
+                zone.Profile.Loot.Count == 0)
+                yield break;
+            if (!LootDelivery.HasContainer(zone.Profile, zone.Center))
+                yield return $"Zone '{zone.Name}' ({zone.Save.Name}): no eligible named NPC-owned loot container found at the known position.";
+        }
 
-            int delivered = 0;
-            IMyCargoContainer container = null;
-            while (zone.Save.PendingLootDrops > 0
-                && LootDelivery.TryDeliver(zone.Profile, zone.Center, ref zone.LootContainerId, out container))
+        private void ReportLootFailure(ZoneSave save, string reason, DateTime now)
+        {
+            string key = save.Name ?? "";
+            if (!_lootFailures.TryGetValue(key, out var failure))
             {
-                zone.Save.PendingLootDrops--;
+                failure = new LootFailure { FirstUtc = now, RetryCount = 1 };
+                _lootFailures[key] = failure;
+                _plugin.Alerts.Send($"Loot queue '{key}' blocked: {save.PendingLootDrops} owed; first failure {now:O}, age 0s, retries 1; {reason}");
+            }
+            else if (failure.RetryCount < long.MaxValue)
+                failure.RetryCount++;
+        }
+
+        private void DeliverQueuedLoot(ZoneSave save, ZoneProfile profile, Vector3D center, DateTime now)
+        {
+            if (save.LootReconciliation != null)
+                return;
+            if (save.PendingLootDrops < 0)
+            {
+                ReportLootFailure(save, "Negative saved loot queue; operator correction required.", now);
+                return;
+            }
+            if (save.PendingLootDrops == 0)
+                return;
+            string key = save.Name ?? "";
+            if (_lootNextAttempt.TryGetValue(key, out var next) && now < next)
+                return;
+            _lootNextAttempt[key] = now.AddSeconds(LootRetrySeconds);
+
+            long delivered = 0;
+            long containerId = 0;
+            IMyCargoContainer container = null;
+            while (save.PendingLootDrops > 0)
+            {
+                var result = LootDelivery.TryDeliver(profile, center, ref containerId, out var attemptedContainer);
+                if (result.Status == LootDeliveryStatus.ReconciliationRequired)
+                {
+                    var marker = result.Reconciliation ?? new LootReconciliationSave
+                    {
+                        ContainerId = containerId, CreatedUtc = now,
+                        Reason = "Delivery required reconciliation but supplied no details."
+                    };
+                    save.LootReconciliation = marker;
+                    SaveState();
+                    _plugin.Alerts.Send($"Zone {key}: loot delivery suspended; container {marker.ContainerId}, attempt {marker.AttemptId}, reason: {marker.Reason}");
+                    break;
+                }
+                if (result.Status != LootDeliveryStatus.Delivered)
+                {
+                    ReportLootFailure(save, result.Reason, now);
+                    break;
+                }
+                save.PendingLootDrops--;
                 delivered++;
+                container = attemptedContainer;
             }
 
             if (delivered > 0)
             {
                 string drops = delivered == 1 ? "Loot has" : $"{delivered} loot drops have";
-                _announce.Chat($"{drops} dropped at {zone.Name}! Loot GPS added for players nearby.");
-                GpsMarkers.AddForAll(GpsMarkers.LootName(zone.Name), "KOTH loot container", container.GetPosition(),
-                    GpsMarkers.LootColor, LootGpsLifetime, LootGpsRange);
+                _announce.Chat($"{drops} dropped at {profile.Name}! Loot GPS added for players nearby.");
+                if (container != null)
+                    GpsMarkers.AddForAll(GpsMarkers.LootName(profile.Name), "KOTH loot container", container.GetPosition(),
+                        GpsMarkers.LootColor, LootGpsLifetime, LootGpsRange);
                 SaveState();
+            }
+            if (delivered > 0 && save.PendingLootDrops == 0 && _lootFailures.TryGetValue(key, out var failure))
+            {
+                _plugin.Alerts.Send($"Loot queue '{key}' recovered after {Math.Max(0, (now - failure.FirstUtc).TotalSeconds):0}s; first failure {failure.FirstUtc:O}, retries {failure.RetryCount}.");
+                _lootFailures.Remove(key);
+                _lootNextAttempt.Remove(key);
             }
         }
 
